@@ -22,13 +22,20 @@ public class SimplifyLockTest {
     public void main() {
 
         for (int i = 0; i < 5; i++) {
-            boolean test = simplifyLock.acquire("test", 20, 10);
+            new Thread(() -> {
+                boolean test = simplifyLock.acquire("test", 20, 10);
 
-            if (test) {
-                log.info("锁获取成功 {}", Thread.currentThread().getId());
-            }
-            simplifyLock.unlock("test");
+                if (test) {
+                    log.info("锁获取成功 {}", Thread.currentThread().getId());
+                }
+                simplifyLock.unlock("test");
+            }).start();
+        }
 
+        try {
+            Thread.sleep(100000);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
         }
     }
 

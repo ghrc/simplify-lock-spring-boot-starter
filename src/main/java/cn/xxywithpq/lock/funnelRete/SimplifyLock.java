@@ -90,16 +90,20 @@ public class SimplifyLock {
      */
     public void unlock(String lockKey) {
         lockKey = packageLockKey(lockKey);
-        if (tryRelease(lockKey)) {
-            unparkSuccessor(lockKey);
+        try (Jedis jedis = jedisPool.getResource()) {
+            if (tryRelease(lockKey, jedis)) {
+                log.info("释放锁成功 unlock {}", Thread.currentThread().getId());
+                unparkSuccessor(lockKey);
+            }
         }
-
     }
 
     private void unparkSuccessor(String lockKey) {
         ConcurrentLinkedDeque<Thread> threads = dequeMap.get(lockKey);
         if (null != threads) {
-            LockSupport.unpark(threads.pollFirst());
+            Thread thread = threads.pollFirst();
+            LockSupport.unpark(thread);
+            log.info("唤醒 unparkSuccessor {}", thread.getId());
         }
     }
 
@@ -131,10 +135,12 @@ public class SimplifyLock {
     }
 
     private void initExclusiveOwnerThread(String lockKey) {
+        log.info("initExclusiveOwnerThread start {}", Thread.currentThread().getId());
         ThreadLock threadLock = new ThreadLock();
         threadLock.addCount();
         threadLock.setThread(Thread.currentThread());
         exclusiveOwnerThread.put(lockKey, threadLock);
+        log.info("initExclusiveOwnerThread end {} {}", Thread.currentThread().getId(), threadLock);
     }
 
     private void removeExclusiveOwnerThread(String lockKey) {
@@ -143,6 +149,7 @@ public class SimplifyLock {
 
     public final boolean acquire(final String lockKey, int leaseTime, long waitTime) {
         final String finalLockKey = packageLockKey(lockKey);
+        log.info("准备拿锁 {}", Thread.currentThread().getId());
         try (Jedis jedis = jedisPool.getResource()) {
             if (!tryAcquire(jedis, 1, finalLockKey, leaseTime, waitTime) && addWaiter(finalLockKey) &&
                     acquireQueued(jedis, 1, finalLockKey, leaseTime, waitTime)) {
@@ -171,12 +178,14 @@ public class SimplifyLock {
         final Thread current = Thread.currentThread();
 //        1.先在本地查询是否当前lockKey是否已经有一个锁
         ThreadLock threadLock = exclusiveOwnerThread.get(lockKey);
+        log.info("先在本地查询是否当前lockKey是否已经有一个锁 {} {}", Thread.currentThread().getId(), threadLock);
         int c = 0;
         if (threadLock != null) {
             c = threadLock.getCount();
         }
 //        2.本地没有记录,进入抢锁流程
         if (c == 0) {
+            log.info("本地没有记录,进入抢锁流程 {}", Thread.currentThread().getId());
             if (!hasQueuedPredecessors(lockKey) &&
                     jedisAcquire(jedis, lockKey, leaseTime)) {
                 initExclusiveOwnerThread(lockKey);
@@ -265,6 +274,7 @@ public class SimplifyLock {
 
     boolean addWaiter(final String lockKey) {
         ConcurrentLinkedDeque<Thread> threadsDeque = dequeMap.get(lockKey);
+        log.info("我被加入等候队列 addWaiter {} {}", Thread.currentThread().getId(), threadsDeque);
         if (null == threadsDeque) {
             ConcurrentLinkedDeque<Thread> deque = new ConcurrentLinkedDeque<>();
             deque.add(Thread.currentThread());
@@ -290,24 +300,26 @@ public class SimplifyLock {
      */
     private final boolean parkAndCheckInterrupt() {
         LockSupport.park(this);
-        return Thread.interrupted();
+        log.info("我被睡眠了 parkAndCheckInterrupt {}", Thread.currentThread().getId());
+        return true;
     }
 
-    public final boolean release(final String lockKey) {
-        if (tryRelease(lockKey)) {
-            unparkSuccessor();
-            return true;
-        }
-        return false;
-    }
+//    public final boolean release(final String lockKey) {
+//        if (tryRelease(lockKey)) {
+//            unparkSuccessor();
+//            return true;
+//        }
+//        return false;
+//    }
 
-    private final boolean tryRelease(String lockKey) {
+    private final boolean tryRelease(String lockKey, Jedis jedis) {
         if (Thread.currentThread() != getExclusiveOwnerThread(lockKey)) {
             throw new IllegalMonitorStateException("Thread: " + Thread.currentThread().getId() + " lockKey: " + lockKey + " 解锁状态异常");
         }
         ThreadLock threadLock = exclusiveOwnerThread.get(lockKey);
         boolean free = false;
         if (null != threadLock && (threadLock.count += -1) == 0) {
+            jedis.del(lockKey);
             removeExclusiveOwnerThread(lockKey);
             free = true;
         }
