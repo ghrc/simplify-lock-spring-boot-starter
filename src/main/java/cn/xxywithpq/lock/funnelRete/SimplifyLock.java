@@ -7,6 +7,7 @@ import org.springframework.stereotype.Component;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPool;
 
+import java.util.Hashtable;
 import java.util.concurrent.*;
 import java.util.concurrent.locks.LockSupport;
 
@@ -30,9 +31,9 @@ public class SimplifyLock {
     /**
      * The current owner of exclusive mode synchronization.
      */
-    private transient ConcurrentHashMap<String, ThreadLock> exclusiveOwnerThread = new ConcurrentHashMap<>();
+    private transient Hashtable<String, ThreadLock> exclusiveOwnerThread = new Hashtable<>();
 
-    private transient ConcurrentHashMap<String, ConcurrentLinkedDeque<Thread>> dequeMap = new ConcurrentHashMap();
+    private transient Hashtable<String, ConcurrentLinkedDeque<Thread>> dequeMap = new Hashtable();
 
     /**
      * 尝试获取锁
@@ -101,9 +102,11 @@ public class SimplifyLock {
     private void unparkSuccessor(String lockKey) {
         ConcurrentLinkedDeque<Thread> threads = dequeMap.get(lockKey);
         if (null != threads) {
-            Thread thread = threads.pollFirst();
-            LockSupport.unpark(thread);
-            log.info("唤醒 unparkSuccessor {}", thread.getId());
+            Thread thread = threads.peekFirst();
+            if (null != thread) {
+                LockSupport.unpark(thread);
+                log.info("唤醒 unparkSuccessor {}", thread.getId());
+            }
         }
     }
 
@@ -137,7 +140,6 @@ public class SimplifyLock {
     private void initExclusiveOwnerThread(String lockKey) {
         log.info("initExclusiveOwnerThread start {}", Thread.currentThread().getId());
         ThreadLock threadLock = new ThreadLock();
-        threadLock.addCount();
         threadLock.setThread(Thread.currentThread());
         exclusiveOwnerThread.put(lockKey, threadLock);
         log.info("initExclusiveOwnerThread end {} {}", Thread.currentThread().getId(), threadLock);
@@ -151,7 +153,7 @@ public class SimplifyLock {
         final String finalLockKey = packageLockKey(lockKey);
         log.info("准备拿锁 {}", Thread.currentThread().getId());
         try (Jedis jedis = jedisPool.getResource()) {
-            if (!tryAcquire(jedis, 1, finalLockKey, leaseTime, waitTime) && addWaiter(finalLockKey) &&
+            if (!tryAcquire(jedis, 1, finalLockKey, leaseTime, waitTime) &&
                     acquireQueued(jedis, 1, finalLockKey, leaseTime, waitTime)) {
             }
         }
@@ -167,7 +169,10 @@ public class SimplifyLock {
      */
     public final boolean hasQueuedPredecessors(String lockKey) {
         ConcurrentLinkedDeque concurrentLinkedDeque = dequeMap.get(lockKey);
-        return !(null == concurrentLinkedDeque || concurrentLinkedDeque.peekFirst() == Thread.currentThread());
+        log.info("hasQueuedPredecessors start {}  {}", Thread.currentThread().getId(), concurrentLinkedDeque);
+        boolean flag = !(null == concurrentLinkedDeque || concurrentLinkedDeque.peekFirst() == Thread.currentThread());
+        log.info("hasQueuedPredecessors end {}", flag);
+        return flag;
     }
 
 
@@ -178,7 +183,7 @@ public class SimplifyLock {
         final Thread current = Thread.currentThread();
 //        1.先在本地查询是否当前lockKey是否已经有一个锁
         ThreadLock threadLock = exclusiveOwnerThread.get(lockKey);
-        log.info("先在本地查询是否当前lockKey是否已经有一个锁 {} {}", Thread.currentThread().getId(), threadLock);
+        log.info("本地查询是否当前lockKey是否已经有一个锁 {} {}", Thread.currentThread().getId(), threadLock);
         int c = 0;
         if (threadLock != null) {
             c = threadLock.getCount();
@@ -196,7 +201,7 @@ public class SimplifyLock {
             if (nextc < 0) {
                 throw new Error("Maximum lock count exceeded");
             }
-            threadLock.addCount(acquires);
+            threadLock.setCount(nextc);
             return true;
         }
         return false;
@@ -213,7 +218,12 @@ public class SimplifyLock {
     private final boolean jedisAcquire(Jedis jedis, final String lockKey, int leaseTime) {
         String result = jedis.set(lockKey, "1", "NX", "EX", leaseTime);
         if (OK.equalsIgnoreCase(result)) {
-            log.info("锁为空直接拿到锁，Thread {} 拿到锁", Thread.currentThread().getId());
+            log.info("jedisAcquire success，Thread {} 拿到锁", Thread.currentThread().getId());
+            ConcurrentLinkedDeque<Thread> threads = dequeMap.get(lockKey);
+            if (null != threads && !threads.isEmpty() && threads.peekFirst() == Thread.currentThread()) {
+                log.info("jedisAcquire 如果该线程是队列第一个线程，删除该节点 {}", Thread.currentThread().getId());
+                threads.pollFirst();
+            }
             return true;
         }
         return false;
@@ -236,18 +246,14 @@ public class SimplifyLock {
         /**
          * 重入次数
          */
-        private volatile int count = 0;
+        private volatile int count = 1;
 
-        void subCount(int acquires) {
-            addCount(acquires);
+        void setCount(int count) {
+            this.count = count;
         }
 
-        void addCount() {
-            addCount(1);
-        }
-
-        void addCount(int acquires) {
-            count += acquires;
+        protected final int getState() {
+            return count;
         }
     }
 
@@ -265,7 +271,7 @@ public class SimplifyLock {
     final boolean acquireQueued(Jedis jedis, int acquires, final String lockKey, int leaseTime, long waitTime) {
         for (; ; ) {
             if (!tryAcquire(jedis, acquires, lockKey, leaseTime, waitTime)) {
-                parkAndCheckInterrupt();
+                parkAndCheckInterrupt(lockKey);
             } else {
                 return true;
             }
@@ -274,7 +280,6 @@ public class SimplifyLock {
 
     boolean addWaiter(final String lockKey) {
         ConcurrentLinkedDeque<Thread> threadsDeque = dequeMap.get(lockKey);
-        log.info("我被加入等候队列 addWaiter {} {}", Thread.currentThread().getId(), threadsDeque);
         if (null == threadsDeque) {
             ConcurrentLinkedDeque<Thread> deque = new ConcurrentLinkedDeque<>();
             deque.add(Thread.currentThread());
@@ -282,6 +287,7 @@ public class SimplifyLock {
         } else {
             threadsDeque.add(Thread.currentThread());
         }
+        log.info("我被加入等候队列 addWaiter {} {}", Thread.currentThread().getId(), dequeMap);
         return true;
     }
 
@@ -298,10 +304,15 @@ public class SimplifyLock {
      *
      * @return {@code true} if interrupted
      */
-    private final boolean parkAndCheckInterrupt() {
-        LockSupport.park(this);
-        log.info("我被睡眠了 parkAndCheckInterrupt {}", Thread.currentThread().getId());
-        return true;
+    private final boolean parkAndCheckInterrupt(String lockKey) {
+        ThreadLock threadLock = exclusiveOwnerThread.get(lockKey);
+        if (threadLock != null) {
+            addWaiter(lockKey);
+            LockSupport.park(this);
+            log.info("我被睡眠了 parkAndCheckInterrupt {}", Thread.currentThread().getId());
+            return true;
+        }
+        return false;
     }
 
 //    public final boolean release(final String lockKey) {
