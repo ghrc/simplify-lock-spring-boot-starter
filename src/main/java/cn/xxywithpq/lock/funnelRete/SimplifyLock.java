@@ -1,5 +1,6 @@
 package cn.xxywithpq.lock.funnelRete;
 
+import com.sun.corba.se.impl.orbutil.concurrent.Sync;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -7,9 +8,12 @@ import org.springframework.stereotype.Component;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPool;
 
-import java.util.Hashtable;
-import java.util.concurrent.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.locks.AbstractQueuedSynchronizer;
+import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.LockSupport;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * @program: infra-monitor-service
@@ -21,8 +25,6 @@ import java.util.concurrent.locks.LockSupport;
 @Component
 public class SimplifyLock {
 
-    ScheduledExecutorService executorService = new ScheduledThreadPoolExecutor(1);
-
     public final String OK = "OK";
 
     @Autowired
@@ -31,72 +33,25 @@ public class SimplifyLock {
     /**
      * The current owner of exclusive mode synchronization.
      */
-    private transient Hashtable<String, ThreadLock> exclusiveOwnerThread = new Hashtable<>();
+    private transient ConcurrentHashMap<String, ThreadLock> exclusiveOwnerThread = new ConcurrentHashMap<>();
 
-    private transient Hashtable<String, ConcurrentLinkedDeque<Thread>> dequeMap = new Hashtable();
-
-    /**
-     * 尝试获取锁
-     *
-     * @param lockKey
-     * @param waitTime  最多等待时间(秒)
-     * @param leaseTime 上锁后自动释放锁时间(秒)
-     * @return
-     */
-    public boolean tryLock(String lockKey, long waitTime, int leaseTime) {
-        Thread thread = Thread.currentThread();
-        final String finalLockKey = packageLockKey(lockKey);
-        try (Jedis jedis = jedisPool.getResource()) {
-            long time;
-            long begin = System.currentTimeMillis();
-            log.info("获取锁开始 {} {}", thread.getId(), begin);
-            String result = jedis.set(finalLockKey, "1", "NX", "EX", leaseTime);
-            if (OK.equalsIgnoreCase(result)) {
-                log.info("锁为空直接拿到锁，Thread {} 拿到锁", thread.getId());
-                return true;
-            }
-
-//            到目前为止已经超时，则返回false
-            time = System.currentTimeMillis() - begin;
-            if (time > TimeUnit.SECONDS.toMillis(waitTime)) {
-                return false;
-            }
-            CountDownLatch l = new CountDownLatch(1);
-            ScheduledFuture<?> scheduledFuture = executorService.scheduleAtFixedRate(() -> {
-                long id = Thread.currentThread().getId();
-                String waitResult = jedis.set(finalLockKey, "1", "NX", "EX", leaseTime);
-                if (OK.equalsIgnoreCase(waitResult)) {
-                    log.info("轮询阶段拿到锁,Thread {} 拿到锁", id);
-                    l.countDown();
-                    throw new RuntimeException();
-                }
-            }, 0, 500, TimeUnit.MILLISECONDS);
-            boolean await = l.await(TimeUnit.SECONDS.toMillis(waitTime) - time, TimeUnit.MILLISECONDS);
-            if (await) {
-                log.info("拿锁阶段,Thread {} 拿到锁", thread.getId());
-            } else {
-                scheduledFuture.cancel(true);
-            }
-            return await;
-        } catch (InterruptedException e) {
-            log.error("FunnelRateLimiter InterruptedException {}", e);
-            return false;
-        }
-    }
+    private transient ConcurrentHashMap<String, ConcurrentLinkedDeque<Thread>> dequeMap = new ConcurrentHashMap();
 
     /**
      * 释放锁
      *
      * @param lockKey
      */
-    public void unlock(String lockKey) {
+    public boolean unlock(String lockKey) {
         lockKey = packageLockKey(lockKey);
         try (Jedis jedis = jedisPool.getResource()) {
             if (tryRelease(lockKey, jedis)) {
                 log.info("释放锁成功 unlock {}", Thread.currentThread().getId());
                 unparkSuccessor(lockKey);
+                return true;
             }
         }
+        return false;
     }
 
     private void unparkSuccessor(String lockKey) {
@@ -110,23 +65,6 @@ public class SimplifyLock {
         }
     }
 
-//    /**
-//     * 释放锁
-//     *
-//     * @param lockKey
-//     */
-//    public void unlock(String lockKey) {
-//        final String finalLockKey = packageLockKey(lockKey);
-//        try (Jedis jedis = jedisPool.getResource()) {
-//            Long del = jedis.del(finalLockKey);
-//            if (del > 0) {
-//                long currentThreadid = Thread.currentThread().getId();
-//                log.info("FunnelRateLimiter 锁已经释放 Thread {}", currentThreadid);
-//            }
-//        } catch (Exception e) {
-//            log.error("FunnelRateLimiter unlock error {}", e);
-//        }
-//    }
 
     private String packageLockKey(String lockKey) {
         return String.format("infra-monitor:distributedLock:%s", lockKey);
@@ -153,8 +91,8 @@ public class SimplifyLock {
         final String finalLockKey = packageLockKey(lockKey);
         log.info("准备拿锁 {}", Thread.currentThread().getId());
         try (Jedis jedis = jedisPool.getResource()) {
-            if (!tryAcquire(jedis, 1, finalLockKey, leaseTime, waitTime) &&
-                    acquireQueued(jedis, 1, finalLockKey, leaseTime, waitTime)) {
+            if (!tryAcquire(jedis, 1, finalLockKey, leaseTime) &&
+                    acquireQueued(jedis, 1, finalLockKey, leaseTime)) {
             }
         }
         return exclusiveOwnerThread.get(finalLockKey).thread == Thread.currentThread() ? true : false;
@@ -179,7 +117,7 @@ public class SimplifyLock {
     /**
      * 尝试获得锁
      */
-    protected final boolean tryAcquire(Jedis jedis, int acquires, final String lockKey, int leaseTime, long waitTime) {
+    protected final boolean tryAcquire(Jedis jedis, int acquires, final String lockKey, int leaseTime) {
         final Thread current = Thread.currentThread();
 //        1.先在本地查询是否当前lockKey是否已经有一个锁
         ThreadLock threadLock = exclusiveOwnerThread.get(lockKey);
@@ -202,6 +140,7 @@ public class SimplifyLock {
                 throw new Error("Maximum lock count exceeded");
             }
             threadLock.setCount(nextc);
+            log.info("tryAcquire 可重入 {}", threadLock);
             return true;
         }
         return false;
@@ -212,21 +151,18 @@ public class SimplifyLock {
      *
      * @param jedis
      * @param lockKey
-     * @param leaseTime
+     * @param leaseTime 暂不实现自动过期
      * @return
      */
-    private final boolean jedisAcquire(Jedis jedis, final String lockKey, int leaseTime) {
-        String result = jedis.set(lockKey, "1", "NX", "EX", leaseTime);
-        if (OK.equalsIgnoreCase(result)) {
-            log.info("jedisAcquire success，Thread {} 拿到锁", Thread.currentThread().getId());
-            ConcurrentLinkedDeque<Thread> threads = dequeMap.get(lockKey);
-            if (null != threads && !threads.isEmpty() && threads.peekFirst() == Thread.currentThread()) {
-                log.info("jedisAcquire 如果该线程是队列第一个线程，删除该节点 {}", Thread.currentThread().getId());
-                threads.pollFirst();
+    private final boolean jedisAcquire(String lockKey, int leaseTime) {
+        try (Jedis jedis = jedisPool.getResource()) {
+            String result = jedis.set(lockKey, "1", "NX");
+            if (OK.equalsIgnoreCase(result)) {
+                log.info("jedisAcquire success，Thread {} 拿到锁", Thread.currentThread().getId());
+                return true;
             }
-            return true;
+            return false;
         }
-        return false;
     }
 
 
@@ -265,12 +201,11 @@ public class SimplifyLock {
      * @param acquires
      * @param lockKey
      * @param leaseTime
-     * @param waitTime
      * @return
      */
-    final boolean acquireQueued(Jedis jedis, int acquires, final String lockKey, int leaseTime, long waitTime) {
+    final boolean acquireQueued(Jedis jedis, int acquires, final String lockKey, int leaseTime) {
         for (; ; ) {
-            if (!tryAcquire(jedis, acquires, lockKey, leaseTime, waitTime)) {
+            if (!tryAcquire(jedis, acquires, lockKey, leaseTime)) {
                 parkAndCheckInterrupt(lockKey);
             } else {
                 return true;
@@ -291,14 +226,6 @@ public class SimplifyLock {
         return true;
     }
 
-
-    /**
-     * Convenience method to interrupt current thread.
-     */
-    static void selfInterrupt() {
-        Thread.currentThread().interrupt();
-    }
-
     /**
      * Convenience method to park and then check if interrupted
      *
@@ -306,8 +233,7 @@ public class SimplifyLock {
      */
     private final boolean parkAndCheckInterrupt(String lockKey) {
         ThreadLock threadLock = exclusiveOwnerThread.get(lockKey);
-        if (threadLock != null) {
-            addWaiter(lockKey);
+        if (null != threadLock && addWaiter(lockKey)) {
             LockSupport.park(this);
             log.info("我被睡眠了 parkAndCheckInterrupt {}", Thread.currentThread().getId());
             return true;
@@ -315,13 +241,6 @@ public class SimplifyLock {
         return false;
     }
 
-//    public final boolean release(final String lockKey) {
-//        if (tryRelease(lockKey)) {
-//            unparkSuccessor();
-//            return true;
-//        }
-//        return false;
-//    }
 
     private final boolean tryRelease(String lockKey, Jedis jedis) {
         if (Thread.currentThread() != getExclusiveOwnerThread(lockKey)) {
@@ -337,9 +256,80 @@ public class SimplifyLock {
         return free;
     }
 
-    private void unparkSuccessor() {
-        LockSupport.unpark(Thread.currentThread());
+    private final ConcurrentHashMap<String, SimplifyLock.Sync> concurrentHashMap = new ConcurrentHashMap();
+
+    public final void lock(String key) {
+        Sync sync;
+        if (concurrentHashMap.contains(key)) {
+            sync = concurrentHashMap.get(key);
+        } else {
+            Sync newSync = new Sync(key);
+            sync = concurrentHashMap.putIfAbsent(key, newSync);
+            if (null == sync) {
+                sync = newSync;
+            }
+        }
+        sync.acquire(1);
     }
 
+    @Data
+    private class Sync extends AbstractQueuedSynchronizer {
+
+        private final String name;
+
+        public Sync(String name) {
+            this.name = name;
+        }
+
+        @Override
+        protected boolean tryAcquire(int arg) {
+//            final String finalLockKey = packageLockKey(lockKey);
+            final Thread current = Thread.currentThread();
+            int c = getState();
+            if (c == 0) {
+                if (!hasQueuedPredecessors() &&
+                        jedisAcquire(lockKey, 0)) {
+                    setExclusiveOwnerThread(current);
+                    return true;
+                }
+            }
+
+//        1.先在本地查询是否当前lockKey是否已经有一个锁
+            ThreadLock threadLock = exclusiveOwnerThread.get(lockKey);
+            log.info("本地查询是否当前lockKey是否已经有一个锁 {} {}", Thread.currentThread().getId(), threadLock);
+            int c = 0;
+            if (threadLock != null) {
+                c = threadLock.getCount();
+            }
+//        2.本地没有记录,进入抢锁流程
+            if (c == 0) {
+                log.info("本地没有记录,进入抢锁流程 {}", Thread.currentThread().getId());
+                if (!hasQueuedPredecessors(lockKey) &&
+                        jedisAcquire(jedis, lockKey, leaseTime)) {
+                    initExclusiveOwnerThread(lockKey);
+                    return true;
+                }
+            } else if (current == threadLock.getThread()) {
+                int nextc = c + acquires;
+                if (nextc < 0) {
+                    throw new Error("Maximum lock count exceeded");
+                }
+                threadLock.setCount(nextc);
+                log.info("tryAcquire 可重入 {}", threadLock);
+                return true;
+            }
+            return false;
+        }
+
+        @Override
+        protected boolean tryRelease(int arg) {
+            return super.tryRelease(arg);
+        }
+
+        @Override
+        protected final boolean isHeldExclusively() {
+            return getExclusiveOwnerThread() == Thread.currentThread();
+        }
+    }
 
 }
