@@ -8,7 +8,6 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.test.annotation.Repeat;
 import org.springframework.test.context.junit4.SpringRunner;
 
 import java.util.concurrent.BrokenBarrierException;
@@ -29,52 +28,30 @@ public class SimplifyLockTest {
      * 带分布式锁
      */
     @Test
-    @Repeat(2)
-    public void main() {
-        int num = 10;
+    public void main() throws InterruptedException {
+        int num = 20;
         CountDownLatch countDownLatch = new CountDownLatch(num);
 
-        final int[] concurrentNum = {0};
+        int[] count = new int[]{0};
         for (int i = 0; i < num; i++) {
             new Thread(() -> {
                 try {
-
-                    boolean test = simplifyLock.acquire("test", 20, 10);
-                    if (test) {
-                        log.info("锁获取成功 {}", Thread.currentThread().getId());
-
-                        boolean test1 = simplifyLock.acquire("test", 20, 10);
-                        if (test1) {
-                            log.info("重入锁 获取成功 {}", Thread.currentThread().getId());
-                        }
-                        test();
-                    }
+                    simplifyLock.lock("test");
+                    log.info("锁获取成功 {}", Thread.currentThread().getId());
+                    int i1 = count[0];
+                    Thread.sleep(1000);
+                    count[0] = i1 + 1;
                 } catch (Exception e) {
                     log.error("SimplifyLockTest e {}", e);
                 } finally {
-                    boolean unLock = false;
                     simplifyLock.unlock("test");
-                    unLock = simplifyLock.unlock("test");
-
-                    if (unLock) {
-                        countDownLatch.countDown();
-                    }
-
+                    countDownLatch.countDown();
                 }
             }).start();
         }
 
-        try {
-            countDownLatch.await();
-        } catch (InterruptedException e) {
-        }
-        log.info("all is ok");
-
-        try {
-            Thread.sleep(5000);
-        } catch (InterruptedException e) {
-            e.printStackTrace();
-        }
+        countDownLatch.await();
+        System.out.println("count:" + count[0]);
     }
 
     private void test() {
