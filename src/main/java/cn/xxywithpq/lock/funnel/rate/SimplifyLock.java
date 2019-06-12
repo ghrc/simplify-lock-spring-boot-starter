@@ -1,6 +1,8 @@
 package cn.xxywithpq.lock.funnel.rate;
 
 import cn.xxywithpq.lock.funnel.rate.conf.CustomsProperties;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -8,7 +10,7 @@ import org.springframework.stereotype.Component;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPool;
 
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.AbstractQueuedSynchronizer;
 
 /**
@@ -22,7 +24,11 @@ public class SimplifyLock {
 
     private final String OK = "OK";
     private final Integer DEFAULT_LEASE_TIME = 30;
-    private final ConcurrentHashMap<String, SimplifyLock.Sync> concurrentHashMap = new ConcurrentHashMap();
+
+    private final Cache<String, Sync> concurrentHashMap = Caffeine.newBuilder()
+            .expireAfterAccess(10, TimeUnit.MINUTES)
+            .build();
+
     @Autowired
     CustomsProperties customsProperties;
     @Autowired
@@ -77,17 +83,13 @@ public class SimplifyLock {
     }
 
 
-    private final Sync getSync(String key) {
+    private final synchronized Sync getSync(String key) {
         key = packageLockKey(key);
         Sync sync;
-        if (concurrentHashMap.containsKey(key)) {
-            sync = concurrentHashMap.get(key);
-        } else {
+        if (null == (sync = concurrentHashMap.getIfPresent(key))) {
             Sync newSync = new Sync(key);
-            sync = concurrentHashMap.putIfAbsent(key, newSync);
-            if (null == sync) {
-                sync = newSync;
-            }
+            concurrentHashMap.put(key, newSync);
+            sync = newSync;
         }
         return sync;
     }

@@ -37,7 +37,7 @@ public class FunnelRateLimiter {
      */
     public boolean isActionAllowed(String unionId, String actionKey, long capacity, float leakingDuration, int quota) {
         String key = String.format("%s:funnel:%s:%s", customsProperties.getNamespace(), actionKey, unionId);
-        boolean tryLock = simplifyLock.lock(LOCK_IS_ACTIONALLOWED + ":" + actionKey);
+        boolean tryLock = simplifyLock.lock(LOCK_IS_ACTIONALLOWED + ":" + key);
         if (!tryLock) {
             log.error("isActionAllowed No lock taken {} {}", unionId, actionKey);
             return false;
