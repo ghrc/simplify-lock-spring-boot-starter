@@ -41,7 +41,6 @@ public class SimplifyLock {
      * @return
      */
     private final boolean jedisAcquire(String lockKey, int leaseTime) {
-        log.info("jedisAcquire {}", Thread.currentThread().getId());
         try (Jedis jedis = jedisPool.getResource()) {
             String result = jedis.set(lockKey, "1", "NX", "EX", DEFAULT_LEASE_TIME);
             if (OK.equalsIgnoreCase(result)) {
@@ -64,7 +63,6 @@ public class SimplifyLock {
     }
 
     public final boolean lock(String key) {
-        log.info("begin to lock {}", Thread.currentThread().getId());
         try {
             getSync(key).acquire(1);
         } catch (Exception e) {

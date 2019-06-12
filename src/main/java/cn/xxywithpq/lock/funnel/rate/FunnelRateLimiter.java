@@ -16,9 +16,7 @@ import java.util.concurrent.*;
 @Slf4j
 public class FunnelRateLimiter {
 
-    public static final String OK = "OK";
     private final String LOCK_IS_ACTIONALLOWED = "isActionAllowed";
-    ScheduledExecutorService executorService = new ScheduledThreadPoolExecutor(10);
 
     @Autowired
     private JedisPool jedisPool;
@@ -38,14 +36,14 @@ public class FunnelRateLimiter {
      * @return 是否允许操作
      */
     public boolean isActionAllowed(String unionId, String actionKey, long capacity, float leakingDuration, int quota) {
-        boolean tryLock = simplifyLock.lock(LOCK_IS_ACTIONALLOWED);
+        String key = String.format("%s:funnel:%s:%s", customsProperties.getNamespace(), actionKey, unionId);
+        boolean tryLock = simplifyLock.lock(LOCK_IS_ACTIONALLOWED + ":" + key);
         if (!tryLock) {
             log.error("isActionAllowed No lock taken {} {}", unionId, actionKey);
             return false;
         }
 
         try (Jedis jedis = jedisPool.getResource()) {
-            String key = String.format("%s:funnel:%s:%s", customsProperties.getNamespace(), actionKey, unionId);
             Funnel funnel = getFunnel(jedis, key);
             if (funnel == null) {
                 funnel = new Funnel(capacity, leakingDuration);
