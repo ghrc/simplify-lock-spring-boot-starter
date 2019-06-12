@@ -2,7 +2,7 @@ package cn.xxywithpq.lock;
 
 
 import cn.xxywithpq.SimplifyLockSpringBootStarterApplication;
-import cn.xxywithpq.lock.funnelRete.SimplifyLock;
+import cn.xxywithpq.lock.funnel.rate.SimplifyLock;
 import lombok.extern.slf4j.Slf4j;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -37,13 +37,15 @@ public class SimplifyLockTest {
             new Thread(() -> {
                 try {
                     simplifyLock.lock("test");
+                    simplifyLock.lock("test");
                     log.info("锁获取成功 {}", Thread.currentThread().getId());
                     int i1 = count[0];
-                    Thread.sleep(1000);
+                    Thread.sleep(3000);
                     count[0] = i1 + 1;
                 } catch (Exception e) {
                     log.error("SimplifyLockTest e {}", e);
                 } finally {
+                    simplifyLock.unlock("test");
                     simplifyLock.unlock("test");
                     countDownLatch.countDown();
                 }
@@ -51,42 +53,9 @@ public class SimplifyLockTest {
         }
 
         countDownLatch.await();
-        System.out.println("count:" + count[0]);
+        log.info("count:" + count[0]);
+        assertEquals(num, count[0]);
     }
 
-    private void test() {
-        int num = 20;
-        CountDownLatch countDownLatch = new CountDownLatch(num);
-        CyclicBarrier barrier = new CyclicBarrier(num);
-
-        final int[] concurrentNum = {0};
-        for (int i = 0; i < num; i++) {
-            new Thread(() -> {
-                try {
-                    barrier.await();
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
-                } catch (BrokenBarrierException e) {
-                    e.printStackTrace();
-                }
-                concurrentNum[0]++;
-                try {
-                    Thread.sleep(1);
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
-                }
-                concurrentNum[0]++;
-                countDownLatch.countDown();
-            }).start();
-        }
-
-        try {
-            countDownLatch.await();
-            log.info("result {}", concurrentNum[0]);
-            assertEquals(num * 2, concurrentNum[0]);
-        } catch (InterruptedException e) {
-            e.printStackTrace();
-        }
-    }
 
 }

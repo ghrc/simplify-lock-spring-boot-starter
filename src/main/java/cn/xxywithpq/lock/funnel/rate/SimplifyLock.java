@@ -1,5 +1,6 @@
-package cn.xxywithpq.lock.funnelRete;
+package cn.xxywithpq.lock.funnel.rate;
 
+import cn.xxywithpq.lock.funnel.rate.conf.CustomsProperties;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -11,7 +12,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.AbstractQueuedSynchronizer;
 
 /**
- * @program: infra-monitor-service
  * @description:
  * @author: qian.pan
  * @create: 2019/04/28 17:58
@@ -21,13 +21,15 @@ import java.util.concurrent.locks.AbstractQueuedSynchronizer;
 public class SimplifyLock {
 
     private final String OK = "OK";
+    private final Integer DEFAULT_LEASE_TIME = 30;
     private final ConcurrentHashMap<String, SimplifyLock.Sync> concurrentHashMap = new ConcurrentHashMap();
-
+    @Autowired
+    CustomsProperties customsProperties;
     @Autowired
     private JedisPool jedisPool;
 
     private String packageLockKey(String lockKey) {
-        return String.format("infra-monitor:distributedLock:%s", lockKey);
+        return String.format("%s:distributedLock:%s", customsProperties.getNamespace(), lockKey);
     }
 
     /**
@@ -41,9 +43,8 @@ public class SimplifyLock {
     private final boolean jedisAcquire(String lockKey, int leaseTime) {
         log.info("jedisAcquire {}", Thread.currentThread().getId());
         try (Jedis jedis = jedisPool.getResource()) {
-            String result = jedis.set(lockKey, "1", "NX");
+            String result = jedis.set(lockKey, "1", "NX", "EX", DEFAULT_LEASE_TIME);
             if (OK.equalsIgnoreCase(result)) {
-                log.info("jedisAcquire success，Thread {} 拿到锁", Thread.currentThread().getId());
                 return true;
             }
             return false;
@@ -53,21 +54,24 @@ public class SimplifyLock {
     /**
      * 尝试redis获取锁(原子操作)
      *
-     * @param jedis
-     * @param lockKey
-     * @param leaseTime 暂不实现自动过期
      * @return
      */
     private final boolean jedisDel(String lockKey) {
         try (Jedis jedis = jedisPool.getResource()) {
-            Long l = jedis.del(lockKey);
+            jedis.del(lockKey);
             return true;
         }
     }
 
-    public final void lock(String key) {
+    public final boolean lock(String key) {
         log.info("begin to lock {}", Thread.currentThread().getId());
-        getSync(key).acquire(1);
+        try {
+            getSync(key).acquire(1);
+        } catch (Exception e) {
+            log.error("lock fail {}", e);
+            return false;
+        }
+        return true;
     }
 
     public final void unlock(String key) {
@@ -106,12 +110,12 @@ public class SimplifyLock {
                 int c = getState();
                 if (c == 0) {
                     if (!hasQueuedPredecessors() && null == getExclusiveOwnerThread()
-                            && jedisAcquire(this.name, 0)) {
+                            && jedisAcquire(this.name, DEFAULT_LEASE_TIME)) {
                         setState(c + 1);
                         setExclusiveOwnerThread(current);
                         return true;
                     }
-                } else if (isHeldExclusively()) {
+                } else if (current == getExclusiveOwnerThread()) {
                     int nextc = c + acquires;
                     if (nextc < 0) {
                         throw new Error("Maximum lock count exceeded");
@@ -130,7 +134,7 @@ public class SimplifyLock {
         @Override
         protected boolean tryRelease(int releases) {
             int c = getState() - releases;
-            if (!isHeldExclusively()) {
+            if (Thread.currentThread() != getExclusiveOwnerThread()) {
                 throw new IllegalMonitorStateException();
             }
             boolean free = false;
@@ -141,11 +145,6 @@ public class SimplifyLock {
             }
             setState(c);
             return free;
-        }
-
-        @Override
-        protected final boolean isHeldExclusively() {
-            return getExclusiveOwnerThread() == Thread.currentThread();
         }
     }
 

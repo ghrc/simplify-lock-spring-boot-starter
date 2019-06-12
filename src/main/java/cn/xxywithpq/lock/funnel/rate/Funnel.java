@@ -1,10 +1,9 @@
-package cn.xxywithpq.lock.funnelRete;
+package cn.xxywithpq.lock.funnel.rate;
 
 import lombok.AllArgsConstructor;
 import lombok.Data;
 
 /**
- * @program: infra-monitor-service
  * @description:
  * @author: qian.pan
  * @create: 2019/04/25 14:41
