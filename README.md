@@ -1,2 +1,2 @@
 # simplify-lock-spring-boot-starter
-Demo project for Spring Boot
+分布式锁，限流工具等实用工具
