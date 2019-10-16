@@ -7,12 +7,11 @@ import java.util.Map;
 import java.util.function.Consumer;
 
 @Slf4j
-public class DelayUtilFactory<E> {
+public class DelayUtilFactory {
 
+    private static LRU<String, DelayUtil> map = new LRU<>(50, 0.75f);
 
-    LRU<String, DelayUtil> map = new LRU<>(1, 0.75f);
-
-    public synchronized DelayUtil getInstance(String key, int seconds, int maxHandleNum, int maxQueueSize, Consumer<E> consumer) {
+    public synchronized static DelayUtil getInstance(String key, int seconds, int maxHandleNum, int maxQueueSize, Consumer consumer) {
         DelayUtil delayUtil;
         if (null != (delayUtil = map.get(key))) {
             return delayUtil;
@@ -21,10 +20,9 @@ public class DelayUtilFactory<E> {
             map.put(key, delayUtil);
             return delayUtil;
         }
-
     }
 
-    class LRU<K, V> extends LinkedHashMap<K, V> {
+    private static class LRU<K, V> extends LinkedHashMap<K, V> {
 
         // 保存缓存的容量
         private int capacity;
